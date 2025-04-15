@@ -1,0 +1,87 @@
+FROM ubuntu:18.04
+
+# @see https://www.snort.org/documents/snort-3-1-18-0-on-ubuntu-18-20
+
+RUN sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && \
+    apt-get update && apt-get dist-upgrade -y
+
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential autotools-dev libdumbnet-dev libluajit-5.1-dev libpcap-dev \
+    zlib1g-dev pkg-config libhwloc-dev cmake liblzma-dev openssl libssl-dev cpputest libsqlite3-dev \
+    libtool uuid-dev git autoconf bison libcmocka-dev libnetfilter-queue-dev libunwind-dev \
+    libmnl-dev ethtool libjemalloc-dev \
+    wget python2.7 automake
+RUN apt-get install -y flex iproute2 iptables tcpdump
+
+
+
+WORKDIR /snort_src
+
+RUN wget --no-check-certificate https://github.com/rurban/safeclib/releases/download/v02092020/libsafec-02092020.tar.gz && \
+    tar -xzf libsafec-02092020.tar.gz
+RUN cd libsafec-02092020.0-g6d921f && ./configure && make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://sourceforge.net/projects/pcre/files/pcre/8.45/pcre-8.45.tar.gz && \
+    tar -xzf pcre-8.45.tar.gz
+RUN cd pcre-8.45 && ./configure && make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://github.com/gperftools/gperftools/releases/download/gperftools-2.9.1/gperftools-2.9.1.tar.gz && \
+    tar xzf gperftools-2.9.1.tar.gz
+RUN cd gperftools-2.9.1 && ./configure && make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate http://www.colm.net/files/ragel/ragel-6.10.tar.gz && \
+    tar -xzf ragel-6.10.tar.gz
+RUN cd ragel-6.10 && ./configure && make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://boostorg.jfrog.io/artifactory/main/release/1.77.0/source/boost_1_77_0.tar.gz && \
+    tar -xzf boost_1_77_0.tar.gz
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://github.com/intel/hyperscan/archive/refs/tags/v5.4.0.tar.gz && \
+    tar -xzf v5.4.0.tar.gz
+
+WORKDIR /snort_src/hyperscan-5.4.0-build
+
+RUN cmake -DCMAKE_INSTALL_PREFIX=/usr/local -DBOOST_ROOT=/snort_src/boost_1_77_0/ ../hyperscan-5.4.0 && \
+    make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://github.com/google/flatbuffers/archive/refs/tags/v2.0.0.tar.gz -O flatbuffers-v2.0.0.tar.gz && \
+    tar -xzf flatbuffers-v2.0.0.tar.gz
+
+WORKDIR /snort_src/flatbuffers-build
+
+RUN cmake ../flatbuffers-2.0.0 && make -j4 && make install
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://github.com/snort3/libdaq/archive/refs/tags/v3.0.5.tar.gz -O libdaq-3.0.5.tar.gz && \
+    tar -xzf libdaq-3.0.5.tar.gz
+RUN cd /snort_src/libdaq-3.0.5 && ./bootstrap && ./configure && make -j4 && make install
+
+RUN ldconfig
+
+RUN cd /snort_src && \
+    wget --no-check-certificate https://github.com/snort3/snort3/archive/refs/tags/3.1.18.0.tar.gz -O snort3-3.1.18.0.tar.gz && \
+    tar -xzf snort3-3.1.18.0.tar.gz
+RUN cd /snort_src/snort3-3.1.18.0 && ./configure_cmake.sh --prefix=/usr/local --enable-tcmalloc && \
+    cd build && make -j4 && make install
+
+WORKDIR /data
+
+# TEST
+# RUN /usr/local/bin/snort -V
+# RUN snort -c /usr/local/etc/snort/snort.lua
+# stdbuf -oL snort -c /usr/local/etc/snort/snort.lua -i eth0 -R /data/rules/local.rules -A fast -s 65535 -k none --lua 'event_queue = { log = 1000 }; alert_fast = { packet = true }' > /data/log/snort3.log
+
+
+
+
+
+
+
+
+
