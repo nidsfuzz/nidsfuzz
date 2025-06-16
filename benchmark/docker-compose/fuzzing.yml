@@ -1,0 +1,37 @@
+#version: '3'
+services:
+    initiator:
+        image: nidsfuzz/nidsfuzz
+        container_name: initiator
+        volumes:
+            - ../rules:/data/rules
+            - initiator-log:/data/log
+            - snort3-log:/data/snort3
+            - suricata-log:/data/suricata
+        command: /bin/bash -c "
+            cd /nidsfuzz/nidsfuzz && 
+            ip route add 192.168.0.0/16 via 172.18.0.11 dev eth0 && 
+            sleep 4 && 
+            LOG_DIR=/data/log python ./cmd.py --fuzzer
+            --out_dir /data/log
+            --initiator_ip 172.18.0.10
+            --responder_ip 192.168.0.10
+            --orch_port ${ORCH_PORT}
+            --data_port ${DATA_PORT}
+            --selection ${SELECTION_ALGORITHM}
+            --mutation ${MUTATION_STRATEGY}
+            --batch_size ${BATCH_SIZE}
+            --repeatable ${REPEATABLE}
+            --rule_file /data/rules/${SNORT3_RULE_FILE}
+            --alert_files /data/snort3/snort3.log /data/suricata/fast.log
+            --threshold ${THRESHOLD}
+            "
+        networks:
+            left:
+                ipv4_address: 172.18.0.10
+        depends_on:
+            - mirror
+            - responder
+            - suricata
+            - snort3
+        privileged: true

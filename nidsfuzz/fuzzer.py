@@ -1,216 +1,174 @@
-import os
-import random
 import sys
+from pathlib import Path
 from queue import Queue
 
-import psutil
+from adaptation import AccumulationAnalyzer
+from commons import PortAllocator, save_alert_discrepancies, save_test_packets
+from generation import load_mutator
+from injection import TunableInitiator
+from preprocessing import Rule, RuleSet, load_selector
+from sanitization import AlertSanitizer
 
-import logger
-from alert_sanitizer import AlertSanitizer
-from commons import utils
-from rule_handler import RuleSet, Rule
-from rule_mutator.rule_mutator import RuleMutator
-from rule_selector import RuleSelector
-from traffic_injector.tunable_initiator import TunableInitiator
+from logger import logger_manager
+logger = logger_manager.setup_logger("fuzzer")
 
-
-def load_rules(rule_files, group: str = None) -> RuleSet:
-    # load rule files
-    rule_pool = None
-    for rule_file in rule_files:
-        logger.debug(f"loading rule file: {rule_file}")
-        ruleset = RuleSet.from_file(rule_file)
-        logger.debug(f"{str(ruleset)}")
-        if rule_pool is None:
-            rule_pool = ruleset
-        else:
-            rule_pool = rule_pool + ruleset
-
-    # group rules
-    if group is not None:
-        logger.debug(f"grouping rules based on criteria: protocol={group}")
-        rule_pool = rule_pool.group(service=group)
-        logger.debug(f"grouped rules: {str(rule_pool)}")
-
-    return rule_pool
-
-
-##############################################################################
-##############################################################################
 
 class Fuzzer:
-    TRAFFIC_FILENAME = 'traffic.bin'
-    STATISTICS_FILENAME = 'statistics.txt'
+
+    output_test_packets = "packets.bin"
+    output_alert_discrepancies = "discrepancies.txt"
 
     def __init__(self,
-                 local_ip: str,
-                 remote_ip: str,
-                 echo_port: int,
+                 initiator_ip: str,
+                 responder_ip: str,
+                 orch_port: int,
                  data_port: int,
-                 out_dir: str,
-                 ):
-        self.local_ip = local_ip
-        self.remote_ip = remote_ip
-        self.echo_port = echo_port
+                 our_dir: str):
+        self.initiator_ip = initiator_ip
+        self.responder_ip = responder_ip
+        self.orch_port = orch_port
         self.data_port = data_port
-        self.test_traffic_file = os.path.join(out_dir, self.TRAFFIC_FILENAME)
-        self.test_statistics_file = os.path.join(out_dir, self.STATISTICS_FILENAME)
 
-        self._running = True
+        self.out_anchor = Path(our_dir)
+        self.out_test_packets_file = self.out_anchor / self.output_test_packets
+        self.out_alert_discrepancies_file = self.out_anchor / self.output_alert_discrepancies
 
-        self.tunable_initiator = TunableInitiator(self.remote_ip, self.echo_port, self.data_port)
+        self._is_running = True
 
-        # The following variables are initialised in the apply_strategy() function
-        self.select_strategy = None
-        self.mutate_strategy = None
-        self.rule_pool = None
-        self.rule_batch = None
-        self.rule_selector = None
-        self.rule_mutator = None
-
-        # The following variables are initialised in the apply_sanitizer() function
-        self.port_selector = None
-        self.alert_sanitizer = None
-        self.test_queue = Queue()
-        self.sanitized_test_queue = Queue()
-
-    def apply_strategy(self,
-                       select_strategy: str,
-                       mutate_strategy: str,
-                       rule_files: list[str],
-                       batch_size: int = 1,
-                       repeatable: bool = False,
-                       only_activated: bool = False):
-        if mutate_strategy not in RuleMutator.STRATEGY:
-            raise ValueError("Invalid mutate strategy")
-
-        self.select_strategy = select_strategy
-        self.mutate_strategy = mutate_strategy
-
-        self.rule_pool = load_rules(rule_files)
-        self.rule_selector = RuleSelector(
-            select_strategy=select_strategy,
-            batch_size=batch_size,
-            repeatable=repeatable,
-            only_activated=only_activated,
-        ).select(self.rule_pool)
-        self.rule_mutator = RuleMutator(mutate_strategy=mutate_strategy)
-        logger.debug(f'applied select strategy: {self.select_strategy}, mutate strategy: {self.mutate_strategy}')
-
-    def apply_sanitizer(self,
-                        alert_files: list[str],
-                        timeout=0.5,
-                        n_tests: int = 25
-                        ):
-        self.port_selector = PortSelector(max_history=n_tests)
-        self.alert_sanitizer = AlertSanitizer(
-            test_queue=self.test_queue,
-            sanitized_test_queue=self.sanitized_test_queue,
-            alert_files=alert_files,
-            timeout=timeout,
-            n_tests=n_tests
+        self.tunable_initiator = TunableInitiator(
+            host=self.responder_ip,
+            orch_port=self.orch_port,
+            data_port=self.data_port
         )
-        logger.debug(f'applied sanitizer: {self.alert_sanitizer}')
+
+        self.rule_pool = None  # RuleSet
+        self.rule_batch = None  # list[Rule]
+        self.rule_selector = None  # Generator[list[Rule], None, None]
+
+        self.rule_mutator = None  # GenericStrategy
+
+        self.port_allocator = None  # PortAllocator
+
+        self.alert_sanitizer = None  # AlertSanitizer
+
+        self.test_case_queue = Queue()
+        self.sanitized_case_queue = Queue()
+
+        self.accumulation_analyzer = None  # AccumulationAnalyzer
+
+    def setup_rule_selector(self,
+                            rule_files: list[str],
+                            algorithm: str,
+                            batch_size: int = 1,
+                            repeatable: bool = False
+                            ):
+        self.rule_pool = RuleSet.from_files(file_paths=rule_files)
+        self.rule_selector = load_selector(
+            algorithm=algorithm,
+            rule_pool=self.rule_pool,
+            batch_size=batch_size,
+            repeatable=repeatable
+        )
+        return self
+
+    def setup_rule_mutator(self,
+                           strategy: str):
+        self.rule_mutator = load_mutator(strategy=strategy)
+        return self
+
+    def setup_alert_sanitizer(self,
+                              monitored_files: list[str],
+                              timeout = 0.5,
+                              port_window_size: int = 25
+                              ):
+        self.port_allocator = PortAllocator(port_window_size=port_window_size)
+        self.alert_sanitizer = AlertSanitizer(
+            test_queue=self.test_case_queue,
+            sanitized_test_queue=self.sanitized_case_queue,
+            alert_files=monitored_files,
+            timeout=timeout,
+            port_window_size=port_window_size
+        )
+        return self
+
+    def setup_accumulation_analyzer(self, threshold: int = 1):
+        self.accumulation_analyzer = AccumulationAnalyzer(threshold=threshold)
+        return self
+
 
     def start(self):
-        while self._running:
-            # load rule_batch
+        while self._is_running:
             try:
-                self.rule_batch: list[Rule] = next(self.rule_selector)
-                logger.debug(f"selected rule: {[rule.id for rule in self.rule_batch]}")
+                # Select rules for testing in this fuzzing iteration
+                while True:
+                    self.rule_batch: list[Rule] = next(self.rule_selector)
+                    selected_rules = ', '.join([rule.id for rule in self.rule_batch])
+                    # Check whether the selected rules deserve to be tested
+                    if self.accumulation_analyzer.validate_rules_for_testing(rules=selected_rules):
+                        break
+                logger.debug(f"selected rule: {selected_rules}")
             except StopIteration:
-                logger.debug(f'no more rules needed to be tested')
+                logger.success(f'no more rules needed to be tested')
                 self.stop()
                 sys.exit(0)
 
-            # do mutation
+            # Generate test packets by mutating the selected rules
             mutants = self.rule_mutator.mutate(self.rule_batch)
 
-            # traffic injection
+            # Injection phase
             for request, response in mutants:
-                # Specify the local addr explicitly
-                local_echo_port, local_data_port = self.port_selector.select_ports()
-                echo_sock = (self.local_ip, local_echo_port)
-                data_sock = (self.local_ip, local_data_port)
-                logger.debug(f"local echo port: {local_echo_port}    local data port: {local_data_port}")
-                self.test_queue.put(
-                    (
-                        ', '.join([rule.id for rule in self.rule_batch]),
-                        data_sock,
-                        (self.remote_ip, self.data_port),
-                        request,
-                        response,
-                    )
+                # Explicitly specify the port used for the tunable initiator
+                data_port, orch_port = self.port_allocator.allocate_ports()
+                logger.debug(f'Allocated ports: [{data_port}, {orch_port}]')
+
+                # Organize the observed information for subsequent sanitization
+                initiator_data_sock = (self.initiator_ip, data_port)
+                responder_data_sock = (self.responder_ip, self.data_port)
+                self.test_case_queue.put((selected_rules, initiator_data_sock, responder_data_sock, request, response))
+
+                # Inject the test packets into the NIDSs under test
+                initiator_orch_sock = (self.initiator_ip, orch_port)
+                self.tunable_initiator.fuzz(
+                    request=request,
+                    response=response,
+                    orch_sock=initiator_orch_sock,
+                    data_sock=initiator_data_sock
                 )
-                self.tunable_initiator.fuzz(request=request, response=response, echo_sock=echo_sock, data_sock=data_sock)
 
-            # alert sanitization
-            self.alert_sanitizer.validate(port_window=self.port_selector.port_window)
+            # Sanitization phase
+            self.alert_sanitizer.sanitize(port_window=self.port_allocator.port_window)
 
-            while not self.sanitized_test_queue.empty():
-                rule_id, initiator, responder, request, response, aligned_alerts = self.sanitized_test_queue.get()
-                logger.debug(f'sanitized {rule_id}, endpoints: {initiator} {responder}')
-                logger.debug(f'sanitized {aligned_alerts}')
-                self.write_statistics(self.test_statistics_file, rule_id, aligned_alerts)
-                utils.write_traffic(self.test_traffic_file, request, response)
+            while not self.sanitized_case_queue.empty():
+                rule_id, initiator, responder, request, response, aligned_alerts = self.sanitized_case_queue.get()
+                logger.success(f'selected rule(s): {rule_id}')
+                logger.success(f'traffic info: {initiator} -> {responder}')
+                logger.success(f'alert discrepancy: {aligned_alerts}')
+                # Save alert discrepancies to the file
+                save_alert_discrepancies(
+                    file_path=f'{self.out_alert_discrepancies_file}',
+                    selected_rules=rule_id,
+                    aligned_alerts=aligned_alerts
+                )
+                # Save test packets to the file
+                save_test_packets(
+                    file_path=f'{self.out_test_packets_file}',
+                    request=request,
+                    response=response
+                )
+
+                # Adaptation phase
+                self.accumulation_analyzer.update_accumulation(rules=rule_id)
+
 
     def stop(self):
-        self._running = False
+        self._is_running = False
         if self.tunable_initiator is not None:
             self.tunable_initiator.stop()
 
         if self.alert_sanitizer is not None:
             self.alert_sanitizer.exit()
 
-    @staticmethod
-    def write_statistics(file_path, rule_id, aligned_alerts):
-        with open(file_path, 'a', encoding='utf-8') as f:
-            f.write(rule_id + '\n')
-            for alert_file, alert_list in aligned_alerts.items():
-                triggered_alerts = ', '.join([e[0] for e in alert_list])
-                f.write(alert_file + ': ' + triggered_alerts + '\n')
-            f.write('\n')
 
-    @staticmethod
-    def read_statistics(file_path: str):
-        with open(file_path, 'r') as f:
-            data_unit = []
-            for line in f:
-                line = line.strip()
-                if line == "":
-                    yield data_unit
-                    data_unit.clear()
-                else:
-                    data_unit.append(line)
-
-
-class PortSelector:
-
-    def __init__(self,
-                 start: int = 1024,
-                 end: int = 65535,
-                 max_history: int = 25):
-        self.start = start
-        self.end = end
-        self.max_history = max_history
-
-        self.used_ports = list()
-
-    @property
-    def port_window(self) -> list[int]:
-        return self.used_ports
-
-    def select_ports(self) -> tuple[int, int]:
-        occupied_ports = {conn.laddr.port for conn in psutil.net_connections() if conn.laddr}
-        while True:
-            echo_port, data_port = random.sample(range(self.start, self.end), 2)
-            if data_port not in occupied_ports and echo_port not in occupied_ports:
-                self.used_ports.append(data_port)
-                if len(self.used_ports) > self.max_history:
-                    del self.used_ports[0]
-                return echo_port, data_port
-            else:
-                logger.debug(f'ports: [{data_port}, {echo_port}] are already in use, trying again...')
 
 
 

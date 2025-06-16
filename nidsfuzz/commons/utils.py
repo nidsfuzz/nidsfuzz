@@ -19,15 +19,33 @@ def hex2str(hex_str: str) -> str:
     return res
 
 
-def write_traffic(file_path: str, request: bytes, response: bytes):
+def save_alert_discrepancies(file_path: str, selected_rules: str, aligned_alerts: dict[str, list[tuple]]):
+    with open(file_path, 'a', encoding='utf-8') as f:
+        f.write(selected_rules + '\n')
+        for alert_file, alert_list in aligned_alerts.items():
+            triggered_alerts = ', '.join([e[0] for e in alert_list])  # Only record the ID of the fired rule
+            f.write(alert_file + ': ' + triggered_alerts + '\n')
+        f.write('\n')
+
+def save_test_packets(file_path: str, request: bytes, response: bytes):
     with open(file_path, 'ab') as f:
         f.write(struct.pack('!I', len(request)))
         f.write(request)
         f.write(struct.pack('!I', len(response)))
         f.write(response)
 
+def load_alert_discrepancies(file_path: str) -> Generator[list[str], None, None]:
+    with open(file_path, 'r') as f:
+        data_unit = []
+        for line in f:
+            line = line.strip()
+            if line == "":
+                yield data_unit
+                data_unit.clear()
+            else:
+                data_unit.append(line)
 
-def read_traffic(file_path: str) -> Generator[tuple[bytes, bytes], None, None]:
+def load_test_packets(file_path: str) -> Generator[tuple[bytes, bytes], None, None]:
     with open(file_path, 'rb') as f:
         while True:
             length_data = f.read(4)

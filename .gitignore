@@ -1,5 +1,7 @@
+rules/
 logs/
 logs_*/
+*-results/
 
 # The log data of BooFuzz
 boofuzz-results/
