@@ -1,0 +1,164 @@
+#version: '3'
+services:
+    initiator:
+        image: nidsfuzz/nidsfuzz
+        container_name: initiator
+        volumes:
+            - ../rules:/data/rules
+            - initiator-log:/data/log
+            - snort3-log:/data/snort3
+            - snort2-log:/data/snort2
+            - suricata-log:/data/suricata
+        command: /bin/bash
+        networks:
+            left:
+                ipv4_address: 172.18.0.10
+        depends_on:
+            - mirror
+            - responder
+            - suricata
+            - snort3
+            - snort2
+        privileged: true
+    
+    mirror:
+        image: nidsfuzz/mirror
+        container_name: mirror
+        command: /bin/bash -c "
+            echo 1 > /proc/sys/net/ipv4/ip_forward &&
+            tc qdisc add dev eth0 ingress &&
+            tc filter add dev eth0 parent ffff':'
+            protocol ip u32 match u32 0 0 action mirred egress mirror dev eth1 &&
+            tc qdisc add dev eth2 ingress &&
+            tc filter add dev eth2 parent ffff':'
+            protocol ip u32 match u32 0 0 action mirred egress mirror dev eth1 &&
+            tail -f /dev/null
+            "
+        networks:
+            left:
+                ipv4_address: 172.18.0.11
+            right:
+                ipv4_address: 192.168.0.11
+            nids:
+                ipv4_address: 10.10.0.10
+        privileged: true
+    
+    responder:
+        image: nidsfuzz/nidsfuzz
+        container_name: responder
+        volumes:
+            - responder-log:/data/log
+            - snort3-log:/data/snort3
+            - suricata-log:/data/suricata
+        command: /bin/bash -c "
+            cd /nidsfuzz/nidsfuzz &&
+            ip route add 172.18.0.0/16 via 192.168.0.11 dev eth0 &&
+            sleep 2 &&
+            python ./main.py server
+            --log-path /data/log/server.log
+            --tuning-port ${TUNING_PORT}
+            --tuned-port ${TUNED_PORT}
+            "
+        networks:
+            right:
+                ipv4_address: 192.168.0.10
+        depends_on:
+            - mirror
+            - suricata
+            - snort3
+            - snort2
+        privileged: true
+    
+    snort3:
+        image: nidsfuzz/snort3
+        container_name: snort3
+        volumes:
+            - ../configs/snort3:/data/config
+            - ../rules:/data/rules
+            - snort3-log:/data/log
+        command: /bin/bash -c "
+            ip link set eth0 promisc on &&
+            stdbuf -oL snort
+            -c /data/config/snort.lua
+            -R /data/rules/${SNORT3_RULE_FILE}
+            -i eth0
+            -A fast
+            -k none
+            --lua 'event_queue = { log = 1000 }'
+            > /data/log/snort3.log
+            "
+        networks:
+            nids:
+                ipv4_address: 10.10.0.11
+        privileged: true
+    
+    suricata:
+        image: nidsfuzz/suricata
+        container_name: suricata
+        volumes:
+            - ../configs/suricata:/data/config
+            - ../rules:/data/rules
+            - suricata-log:/data/log/
+        command: /bin/bash -c "
+            ip link set eth0 promisc on &&
+            suricata
+            -c /data/config/suricata.yaml
+            -S /data/rules/${SNORT2_RULE_FILE}
+            -i eth0
+            -l /data/log/
+            "
+        cap_add:
+            - NET_ADMIN
+        mem_limit: 4g
+        networks:
+            nids:
+                ipv4_address: 10.10.0.12
+        privileged: true
+    
+    snort2:
+        image: nidsfuzz/snort2
+        container_name: snort2
+        volumes:
+            - ../configs/snort2:/data/config
+            - ../rules:/data/rules
+            - snort2-log:/data/log
+        command: /bin/bash -c "
+            ip link set eth0 promisc on &&
+            cp /data/rules/${SNORT2_RULE_FILE} /etc/snort/rules/local.rules && 
+            stdbuf -oL snort
+            -c /data/config/snort.conf
+            -i eth0
+            -A console
+            -k none
+            > /data/log/snort2.log
+            "
+        networks:
+            nids:
+                ipv4_address: 10.10.0.13
+        privileged: true
+
+networks:
+    left:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: 172.18.0.0/16
+
+    right:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: 192.168.0.0/16
+
+    nids:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: 10.10.0.0/16
+
+volumes:
+    suricata-log:
+    snort3-log:
+    snort2-log:
+    initiator-log:
+    responder-log:

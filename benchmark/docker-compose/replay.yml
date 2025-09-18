@@ -1,0 +1,35 @@
+#version: '3'
+services:
+    initiator:
+        image: nidsfuzz/nidsfuzz
+        container_name: initiator
+        volumes:
+            - replay:/data/replay/:ro,nocopy
+            - initiator-log:/data/log
+            - snort3-log:/data/snort3
+            - suricata-log:/data/suricata
+        command: /bin/bash -c "
+            cd /nidsfuzz/nidsfuzz && 
+            ip route add 192.168.0.0/16 via 172.18.0.11 dev eth0 && 
+            sleep 4 && 
+            python ./main.py replay
+            --log-path /data/log/replay.log
+            --input /data/replay/
+            --client 172.18.0.10
+            --server 192.168.0.10
+            --tuning-port ${TUNING_PORT}
+            --tuned-port ${TUNED_PORT}
+            "
+        networks:
+            left:
+                ipv4_address: 172.18.0.10
+        depends_on:
+            - mirror
+            - responder
+            - suricata
+            - snort3
+        privileged: true
+
+volumes:
+    replay:
+        external: true
