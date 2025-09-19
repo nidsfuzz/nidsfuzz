@@ -4,10 +4,8 @@
 **A Fuzzing Framework for Network Intrusion Detection Systems (NIDS)**  
 > _Automated environment for discovering rule enforcement inconsistencies in **Snort2**, **Snort3**, and **Suricata**._  
 
-<ul>
-  <li><span style="color: #007ACC; font-size: 1.2em;">●</span> <strong>Framework</strong>: Docker-Compose</li>
-  <li><span style="color: #4CAF50; font-size: 1.2em;">●</span> <strong>Python</strong>: >=3.11</li>
-</ul>
+![architecture](https://img.shields.io/badge/Framework-Docker--Compose-blue?style=for-the-badge)  
+![python](https://img.shields.io/badge/Python-%3E%3D3.11-green?style=for-the-badge&logo=python)  
 
 ---
 
@@ -157,3 +155,4 @@ Feel free to submit issues or PRs to improve **NIDSFuzz**.
 ## 📜 License
 
 Released under the [MIT License](LICENSE).
+
